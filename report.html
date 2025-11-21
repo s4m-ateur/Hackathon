@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>SOS Reporter</title>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    input, button { font-size: 18px; margin: 10px 0; padding: 8px; }
+    pre { background: #f1f1f1; padding: 10px; height: 200px; overflow: auto; }
+  </style>
+</head>
+<body>
+
+<h2>📍 Smart SOS Reporter</h2>
+
+<label>Device ID:</label>
+<br>
+<input id="did" value="user1" />
+
+<br><br>
+<button id="start">Start Reporting</button>
+<button id="stop">Stop</button>
+
+<br><br>
+<pre id="log">LOG:\n</pre>
+
+<div id="volumeMeter" style="margin-top:8px; font-family:monospace;"></div>
+
+<script>
+// 👉 UPDATE THIS WITH YOUR NGROK BACKEND URL:
+const BACKEND_URL = "https://unfarmed-maximo-overheady.ngrok-free.dev/report_location";
+
+const LOG = document.getElementById("log");
+const deviceIdInput = document.getElementById("did");
+let deviceId = deviceIdInput.value;
+let watchId = null;
+
+let lastLat = null;
+let lastLon = null;
+
+// POST data helper
+async function postData(extra = {}) {
+  if (!lastLat || !lastLon) return;
+
+  const payload = {
+    device_id: deviceId,
+    lat: lastLat,
+    lon: lastLon,
+    timestamp: Date.now(),
+    ...extra
+  };
+
+  try {
+    await fetch(BACKEND_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    LOG.textContent += "POST OK\n";
+  } catch (e) {
+    LOG.textContent += "POST failed: " + e + "\n";
+  }
+}
+
+// Start GPS tracking
+document.getElementById("start").onclick = () => {
+  deviceId = deviceIdInput.value;
+
+  LOG.textContent += "Starting GPS...\n";
+
+  if (!navigator.geolocation) {
+    LOG.textContent += "Geolocation not supported.\n";
+    return;
+  }
+
+  watchId = navigator.geolocation.watchPosition(
+    pos => {
+      lastLat = pos.coords.latitude;
+      lastLon = pos.coords.longitude;
+
+      LOG.textContent += `Location: ${lastLat.toFixed(5)}, ${lastLon.toFixed(5)}\n`;
+      postData();
+    },
+    err => {
+      LOG.textContent += `Geo error (${err.code}): ${err.message}\n`;
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 2000 }
+  );
+
+  startAudioDetection(); // mic detection begins
+};
+
+// Stop everything
+document.getElementById("stop").onclick = () => {
+  if (watchId) navigator.geolocation.clearWatch(watchId);
+  stopAudioDetection();
+  LOG.textContent += "Stopped.\n";
+};
+
+/* AUDIO DISTRESS DETECTION */
+let audioContext, analyser, dataArray, micStream;
+let audioRAF = null;
+let distressTriggered = false;
+const TEST_THRESHOLD = 40; // set low to test mic
+
+function log(msg) {
+  LOG.textContent += msg + "\n";
+  LOG.scrollTop = LOG.scrollHeight;
+}
+
+async function startAudioDetection() {
+  log("Starting microphone...");
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    log("Mic denied or error: " + err);
+    return;
+  }
+
+  audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  const source = audioContext.createMediaStreamSource(micStream);
+
+  analyser = audioContext.createAnalyser();
+  analyser.fftSize = 512;
+  dataArray = new Uint8Array(analyser.frequencyBinCount);
+  source.connect(analyser);
+
+  log("Audio detection started");
+  detectDistressDebug();
+}
+
+function stopAudioDetection() {
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+  if (audioRAF) cancelAnimationFrame(audioRAF);
+  if (audioContext) {
+    try { audioContext.close(); } catch(e) {}
+    audioContext = null;
+  }
+  log("Audio detection stopped");
+}
+
+function detectDistressDebug() {
+  analyser.getByteFrequencyData(dataArray);
+
+  let sum = 0;
+  for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+  const volume = sum / dataArray.length;
+
+  const meter = document.getElementById('volumeMeter');
+  const blocks = Math.min(30, Math.round((volume/255)*30));
+  meter.textContent = 'vol: ' + Math.round(volume) + ' | ' + '█'.repeat(blocks) + '░'.repeat(30-blocks);
+
+  if (!window._frameCounter) window._frameCounter = 0;
+  window._frameCounter++;
+  if (window._frameCounter % 20 === 0) {
+    log("volume: " + Math.round(volume));
+  }
+
+  if (volume > TEST_THRESHOLD && !distressTriggered) {
+    distressTriggered = true;
+    log("⚠️ TEST DISTRESS TRIGGERED (volume=" + Math.round(volume) + ")");
+    postData({ distress: true });
+    setTimeout(() => distressTriggered = false, 3000);
+  }
+
+  audioRAF = requestAnimationFrame(detectDistressDebug);
+}
+</script>
+</body>
+</html>
